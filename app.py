@@ -31,7 +31,9 @@ INDEX_DEFS = [("코스피", "^KS11", "EWY", "kospi"),
               ("S&P 500", "^GSPC", "SPY", "sp500"),
               ("니케이 225", "^N225", "EWJ", "nikkei")]
 SP500_TOP5 = ["NVDA", "MSFT", "AAPL", "AMZN", "GOOGL"]
-NIKKEI_TOP5 = ["7203.T", "6758.T", "8035.T", "9984.T", "6861.T"]
+NIKKEI_TOP5 = ["7203.T", "6758.T", "8035.T"]  # 상위 3 (4위 소프트뱅크·5위 키엔스 제외)
+# 코스피 목록에 고정 추가: TIGER 미국S&P500, TIGER 미국나스닥100
+KOSPI_EXTRA = ["360750", "133690"]
 NAVER_H = {"User-Agent": UA}
 
 
@@ -174,7 +176,7 @@ def fetch_all():
         fund_fut = ex.submit(yahoo.quote, fund_syms)
         rank_fut = ex.submit(fetch_kospi_top5)
         etf_div_futs = {etf: ex.submit(fetch_naver_etf_div, etf) for _, _, etf, _ in INDEX_DEFS}
-        kospi_codes = rank_fut.result()
+        kospi_codes = rank_fut.result() + KOSPI_EXTRA  # 시총 top5 + 고정 ETF 2종
         kospi_futs = {c: ex.submit(fetch_naver_stock, c) for c in kospi_codes}
         top5_syms = [c + ".KS" for c in kospi_codes] + SP500_TOP5 + NIKKEI_TOP5
         series_futs = {s: ex.submit(fetch_series, s) for s in price_syms + top5_syms}
@@ -364,7 +366,7 @@ function badges(q){
   </div>`;
 }
 
-function top5(list){
+function top5(list, label){
   let rows = list.map(s=>`<tr>
     <td class="nm">${s.name||""}</td>
     <td>${price(s.price)}</td>
@@ -375,7 +377,7 @@ function top5(list){
     <td class="pbr">${num(s.pbr,2)}</td>
   </tr>`).join("");
   return `<table><thead><tr>
-    <th>시총 상위 5</th><th>현재가</th><th>일</th><th>주</th><th>월</th><th>PER</th><th>PBR</th>
+    <th>${label||"시총 상위 5"}</th><th>현재가</th><th>일</th><th>주</th><th>월</th><th>PER</th><th>PBR</th>
   </tr></thead><tbody>${rows}</tbody></table>`;
 }
 
@@ -387,7 +389,7 @@ function indexCard(name, d, top){
     ${badges(q)}
     <div class="val">PER ${num(v.per,2)} · PBR ${num(v.pbr,2)} · 배당 ${num(v.div,2)}%</div>
     <div class="note">※ 밸류에이션은 국가대표 ETF 프록시 기준(EWY/SPY/EWJ)</div>
-    ${top5(top||[])}
+    ${top5(top||[], name==="코스피" ? "주요 종목" : "시총 상위 5")}
   </div>`;
 }
 
