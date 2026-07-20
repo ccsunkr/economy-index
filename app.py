@@ -12,8 +12,16 @@ import json
 import time
 import threading
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor
+
+# 서버(Render)는 UTC로 동작하므로 표시 시각은 미국 동부시(뉴욕)로 고정.
+# ZoneInfo는 서머타임(EDT/EST)을 자동 처리. 실패 시 EDT(-4h) 고정으로 폴백.
+try:
+    from zoneinfo import ZoneInfo
+    ET = ZoneInfo("America/New_York")
+except Exception:
+    ET = timezone(timedelta(hours=-4))
 import urllib.request
 import urllib.parse
 import http.cookiejar
@@ -297,7 +305,7 @@ def fetch_all():
                     lst.append(e)
             result["top5"][name] = lst
 
-    result["ts"] = datetime.now().strftime("%m/%d %H:%M")
+    result["ts"] = datetime.now(ET).strftime("%m/%d %H:%M")  # 미국 동부시
     result["index_order"] = [d[0] for d in INDEX_DEFS]
     result["fx_order"] = [d[0] for d in FX_DEFS]
     result["commo_order"] = [d[0] for d in COMMO_DEFS]
