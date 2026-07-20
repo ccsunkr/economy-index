@@ -116,9 +116,58 @@ def fetch_series(symbol):
         def pct(a, b):
             return (a - b) / b * 100 if b else None
 
-        return {"last": last, "d1": pct(last, prev), "w1": pct(last, ago(7)), "m1": pct(last, ago(30))}
+        wb, mb = ago(7), ago(30)
+        return {"last": last, "d1": pct(last, prev), "w1": pct(last, wb), "m1": pct(last, mb),
+                "wb": wb, "mb": mb}
     except Exception:
         return None
+
+
+def fetch_etf_valuation(yahoo, symbol):
+    """지수 프록시 ETF의 PER/PBR — quoteSummary topHoldings(역수 환산).
+    (SPY 교차검증: 역수 PER 26.87 ≈ v7 26.74 / v7의 ETF priceToBook은 부정확)"""
+    try:
+        if not yahoo.crumb:
+            return {}
+        u = ("https://query2.finance.yahoo.com/v10/finance/quoteSummary/" + symbol
+             + "?modules=topHoldings&crumb=" + urllib.parse.quote(yahoo.crumb))
+        raw = yahoo.opener.open(urllib.request.Request(
+            u, headers={"User-Agent": UA, "Accept": "application/json"}), timeout=12).read().decode()
+        e = json.loads(raw)["quoteSummary"]["result"][0]["topHoldings"]["equityHoldings"]
+        pe = e.get("priceToEarnings", {}).get("raw")
+        pb = e.get("priceToBook", {}).get("raw")
+        return {"per": (1 / pe) if pe else None, "pbr": (1 / pb) if pb else None}
+    except Exception:
+        return {}
+
+
+def fetch_naver_price(code, is_index=False):
+    """네이버 실시간 시세(야후 한국시세는 ~20분 지연이라 대체)."""
+    try:
+        url = ("https://m.stock.naver.com/api/index/KOSPI/basic" if is_index
+               else f"https://m.stock.naver.com/api/stock/{code}/basic")
+        d = json.loads(_http_get(url, NAVER_H, 10))
+        last = _num(d.get("closePrice"))
+        if last is None:
+            return None
+        return {"last": last, "d1": _num(d.get("fluctuationsRatio")), "name": d.get("stockName")}
+    except Exception:
+        return None
+
+
+def merge_kr(ser, live):
+    """야후 과거기준(주/월) + 네이버 실시간 현재가·일간등락 결합."""
+    if not live:
+        return ser
+    out = dict(ser or {})
+    last = live["last"]
+    out["last"] = last
+    out["d1"] = live.get("d1")
+    wb = (ser or {}).get("wb")
+    mb = (ser or {}).get("mb")
+    out["w1"] = ((last - wb) / wb * 100) if wb else None
+    out["m1"] = ((last - mb) / mb * 100) if mb else None
+    return out
 
 
 def fetch_naver_stock(code):
@@ -172,14 +221,19 @@ def fetch_all():
     fund_syms = [d[2] for d in INDEX_DEFS] + SP500_TOP5 + NIKKEI_TOP5
 
     yahoo = Yahoo()
+    yahoo._ensure()  # crumb 먼저 확보(병렬 태스크 공유)
     with ThreadPoolExecutor(max_workers=16) as ex:
         fund_fut = ex.submit(yahoo.quote, fund_syms)
+        etf_val_futs = {etf: ex.submit(fetch_etf_valuation, yahoo, etf)
+                        for _, _, etf, _ in INDEX_DEFS}
         rank_fut = ex.submit(fetch_kospi_top5)
         etf_div_futs = {etf: ex.submit(fetch_naver_etf_div, etf) for _, _, etf, _ in INDEX_DEFS}
         kospi_codes = rank_fut.result() + KOSPI_EXTRA  # 시총 top5 + 고정 ETF 2종
         kospi_futs = {c: ex.submit(fetch_naver_stock, c) for c in kospi_codes}
         top5_syms = [c + ".KS" for c in kospi_codes] + SP500_TOP5 + NIKKEI_TOP5
         series_futs = {s: ex.submit(fetch_series, s) for s in price_syms + top5_syms}
+        kr_live_futs = {c: ex.submit(fetch_naver_price, c) for c in kospi_codes}
+        kospi_idx_live_fut = ex.submit(fetch_naver_price, "KOSPI", True)
         series = {}
         for s, f in series_futs.items():
             try:
@@ -198,13 +252,27 @@ def fetch_all():
                                             "m1": s["m1"], "dig": dig} if s else None)
         for name, sym, etf, kind in INDEX_DEFS:
             val = _val(qmap.get(etf))
+            try:  # topHoldings 기준 PER/PBR 우선
+                tv = etf_val_futs[etf].result()
+                if tv.get("per") is not None:
+                    val["per"] = tv["per"]
+                if tv.get("pbr") is not None:
+                    val["pbr"] = tv["pbr"]
+            except Exception:
+                pass
             try:
                 nd = etf_div_futs[etf].result()
                 if nd is not None:
                     val["div"] = nd
             except Exception:
                 pass
-            result["indices"][name] = {"quote": series.get(sym), "val": val}
+            q = series.get(sym)
+            if kind == "kospi":  # 코스피 지수는 네이버 실시간가로 대체
+                try:
+                    q = merge_kr(q, kospi_idx_live_fut.result())
+                except Exception:
+                    pass
+            result["indices"][name] = {"quote": q, "val": val}
             lst = []
             if kind == "kospi":
                 for c in kospi_codes:
@@ -212,7 +280,11 @@ def fetch_all():
                         nv = kospi_futs[c].result()
                     except Exception:
                         nv = {"name": c, "per": None, "pbr": None}
-                    e = _ser(series.get(c + ".KS"))
+                    try:
+                        live = kr_live_futs[c].result()
+                    except Exception:
+                        live = None
+                    e = _ser(merge_kr(series.get(c + ".KS"), live))  # 네이버 실시간가
                     e.update({"name": nv["name"], "per": nv["per"], "pbr": nv["pbr"]})
                     lst.append(e)
             else:
@@ -233,7 +305,7 @@ def fetch_all():
 
 
 # ================= 캐시 =================
-CACHE_TTL = int(os.environ.get("CACHE_TTL", "120"))
+CACHE_TTL = int(os.environ.get("CACHE_TTL", "60"))
 _cache = {"data": None, "at": 0}
 _lock = threading.Lock()
 
